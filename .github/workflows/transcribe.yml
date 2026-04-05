@@ -15,6 +15,9 @@ on:
         options:
           - groq
           - openai
+  push:
+    paths:
+      - 'state/trigger.json'
   schedule:
     - cron: '0 8 * * *'
 
@@ -51,9 +54,27 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade pip && pip install -r requirements.txt
 
+      - name: Load trigger file
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          if [ -f state/trigger.json ]; then
+            url=$(python3 -c "import json; print(json.load(open('state/trigger.json')).get('episode_url',''))")
+            provider=$(python3 -c "import json; print(json.load(open('state/trigger.json')).get('provider','groq'))")
+            echo "EPISODE_URL=${url}" >> "$GITHUB_ENV"
+            echo "WHISPER_PROVIDER=${provider}" >> "$GITHUB_ENV"
+          fi
+
       - name: Run transcription
-        if: ${{ github.event_name == 'workflow_dispatch' || vars.RSS_FEEDS != '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'push' || vars.RSS_FEEDS != '' }}
         run: python scripts/transcribe_ci.py
+
+      - name: Clear trigger file
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          if [ -f state/trigger.json ] && python3 -c "import json,sys; sys.exit(0 if json.load(open('state/trigger.json')).get('episode_url') else 1)" 2>/dev/null; then
+            echo '{}' > state/trigger.json
+            git add state/trigger.json
+          fi
 
       - name: Detect transcript updates
         id: changes
