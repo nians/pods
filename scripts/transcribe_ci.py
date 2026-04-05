@@ -206,44 +206,55 @@ def split_audio(path: str, chunk_mb: int = CHUNK_SIZE_MB) -> list:
 #  Whisper API 转录
 # ============================================================
 
-def transcribe_groq(paths: list, lang: str = "zh") -> list:
-    key = os.environ.get("GROQ_API_KEY")
-    if not key:
-        sys.exit("❌ GROQ_API_KEY 未设置")
-
-    segments, offset = [], 0.0
-    for i, p in enumerate(paths):
-        print(f"  Groq whisper-large-v3: 第 {i+1}/{len(paths)} 段...")
-        with open(p, "rb") as f:
+def _groq_request(path: str, key: str, lang: str, max_retries: int = 5):
+    """发送单个 Groq 转录请求，带指数退避重试。"""
+    import time
+    for attempt in range(max_retries):
+        with open(path, "rb") as f:
             resp = requests.post(
                 "https://api.groq.com/openai/v1/audio/transcriptions",
                 headers={"Authorization": f"Bearer {key}"},
-                files={"file": (os.path.basename(p), f)},
+                files={"file": (os.path.basename(path), f)},
                 data={"model": "whisper-large-v3", "language": lang,
                       "response_format": "verbose_json",
                       "timestamp_granularities[]": "segment"},
                 timeout=300,
             )
+        if resp.status_code == 200:
+            return resp.json()
         if resp.status_code == 429:
-            import time
-            wait = int(resp.headers.get("retry-after", 60))
-            print(f"    限流，等待 {wait}s...")
-            time.sleep(wait)
-            # 重试一次
-            with open(p, "rb") as f:
-                resp = requests.post(
-                    "https://api.groq.com/openai/v1/audio/transcriptions",
-                    headers={"Authorization": f"Bearer {key}"},
-                    files={"file": (os.path.basename(p), f)},
-                    data={"model": "whisper-large-v3", "language": lang,
-                          "response_format": "verbose_json",
-                          "timestamp_granularities[]": "segment"},
-                    timeout=300,
-                )
-        if resp.status_code != 200:
-            sys.exit(f"❌ Groq: {resp.status_code} {resp.text[:300]}")
+            wait = int(resp.headers.get("retry-after", 0))
+            backoff = max(wait, 2 ** attempt * 3)
+            print(f"    ⏳ 429 限流，{backoff}s 后重试 ({attempt+1}/{max_retries})...")
+            time.sleep(backoff)
+            continue
+        sys.exit(f"❌ Groq: {resp.status_code} {resp.text[:300]}")
+    sys.exit("❌ Groq: 重试次数用尽")
 
-        data = resp.json()
+
+def transcribe_groq(paths: list, lang: str = "zh") -> list:
+    import time
+
+    key = os.environ.get("GROQ_API_KEY")
+    if not key:
+        sys.exit("❌ GROQ_API_KEY 未设置")
+
+    # 节流: Groq 免费额度 ~18 req/min，间隔 3.5s 可稳定跑满
+    MIN_INTERVAL = 3.5
+    last_req_time = 0.0
+
+    segments, offset = [], 0.0
+    for i, p in enumerate(paths):
+        print(f"  Groq whisper-large-v3: 第 {i+1}/{len(paths)} 段...")
+
+        # 节流等待
+        elapsed = time.time() - last_req_time
+        if elapsed < MIN_INTERVAL:
+            time.sleep(MIN_INTERVAL - elapsed)
+
+        last_req_time = time.time()
+        data = _groq_request(p, key, lang)
+
         for s in data.get("segments", []):
             segments.append({"start": s["start"] + offset,
                              "end": s["end"] + offset, "text": s["text"]})
