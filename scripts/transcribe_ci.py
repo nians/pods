@@ -181,12 +181,23 @@ def split_audio(path: str, chunk_mb: int = CHUNK_SIZE_MB) -> list:
     n = math.ceil(size_mb / chunk_mb)
     chunk_ms = len(audio) // n
 
+    src = Path(path)
+    suffix = src.suffix.lower()
+    export_format = {
+        ".m4a": "mp4",
+        ".mp4": "mp4",
+        ".mp3": "mp3",
+        ".wav": "wav",
+        ".ogg": "ogg",
+        ".flac": "flac",
+    }.get(suffix, suffix.lstrip(".") or "mp3")
+
     chunks = []
     for i in range(n):
         seg = audio[i * chunk_ms: min((i + 1) * chunk_ms, len(audio))]
-        cp = path.replace(".", f"_p{i}.")
-        seg.export(cp, format=path.rsplit(".", 1)[-1])
-        chunks.append(cp)
+        cp = src.with_name(f"{src.stem}_p{i}{suffix}")
+        seg.export(str(cp), format=export_format)
+        chunks.append(str(cp))
     print(f"  ✓ 切分为 {n} 段")
     return chunks
 
