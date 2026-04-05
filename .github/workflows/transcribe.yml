@@ -1,0 +1,97 @@
+name: Podcast Transcribe
+
+on:
+  workflow_dispatch:
+    inputs:
+      episode_url:
+        description: Xiaoyuzhou episode URL
+        required: false
+        type: string
+      provider:
+        description: Whisper provider
+        required: false
+        default: groq
+        type: choice
+        options:
+          - groq
+          - openai
+  schedule:
+    - cron: '0 8 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: podcast-transcribe
+  cancel-in-progress: false
+
+jobs:
+  transcribe:
+    runs-on: ubuntu-latest
+    env:
+      EPISODE_URL: ${{ github.event.inputs.episode_url || '' }}
+      WHISPER_PROVIDER: ${{ github.event.inputs.provider || vars.WHISPER_PROVIDER || 'groq' }}
+      RSS_FEEDS: ${{ vars.RSS_FEEDS || '' }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY || '' }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Run transcription
+        if: ${{ github.event_name == 'workflow_dispatch' || vars.RSS_FEEDS != '' }}
+        run: python scripts/transcribe_ci.py
+
+      - name: Detect transcript updates
+        id: changes
+        run: |
+          files="$(git status --porcelain | awk '{print $2}' | grep '^transcripts/.*\.md$' || true)"
+          {
+            echo 'files<<EOF'
+            echo "$files"
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Commit transcripts
+        run: |
+          if git diff --quiet -- transcripts state; then
+            echo "No transcript changes to commit"
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add transcripts state
+          git commit -m "Add transcript artifacts"
+          git push
+
+      - name: Write summary
+        run: |
+          {
+            echo "## Podcast Transcribe"
+            if [ -n "${{ steps.changes.outputs.files }}" ]; then
+              echo
+              echo "### Raw URLs"
+              for file in ${{ steps.changes.outputs.files }}; do
+                echo "- https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/${file}"
+              done
+            elif [ "${{ github.event_name }}" = "schedule" ] && [ -z "${RSS_FEEDS}" ]; then
+              echo
+              echo "Skipped scheduled run because RSS_FEEDS is empty."
+            else
+              echo
+              echo "No new transcript files were generated."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
